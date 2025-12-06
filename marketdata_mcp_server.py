@@ -105,7 +105,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="list_exchanges",
-            description="List all exchanges that have subscribed symbols",
+            description="List all exchanges that have subscribed symbols, showing the available symbol types in each exchange",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -115,6 +115,20 @@ async def list_tools() -> list[Tool]:
                         "default": False
                     }
                 }
+            }
+        ),
+        Tool(
+            name="get_symbol_types",
+            description="Get the distinct symbol types available in a specific exchange. Use this to discover valid type values before querying symbols.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "exchange_code": {
+                        "type": "string",
+                        "description": "Exchange code (e.g., US, LSE, XETRA, CBOE)"
+                    }
+                },
+                "required": ["exchange_code"]
             }
         ),
         Tool(
@@ -221,6 +235,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return await handle_search_symbols(arguments)
         elif name == "list_exchanges":
             return await handle_list_exchanges(arguments)
+        elif name == "get_symbol_types":
+            return await handle_get_symbol_types(arguments)
         elif name == "get_subscribed_symbols":
             return await handle_get_subscribed_symbols(arguments)
         elif name == "get_symbol_info":
@@ -329,16 +345,57 @@ async def handle_search_symbols(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def handle_list_exchanges(arguments: dict[str, Any]) -> list[TextContent]:
-    """List all exchanges with subscribed symbols."""
+    """List all exchanges with subscribed symbols and their available types."""
     include_synthetics = arguments.get("include_synthetics", False)
 
     db = get_database()
     try:
-        df = db.get_subscribed_exchanges(include_synthetics=include_synthetics)
+        exchanges_df = db.get_subscribed_exchanges(include_synthetics=include_synthetics)
+        symbols_df = db.get_subscribed_symbols(include_synthetics=include_synthetics)
 
         lines = ["Exchanges with Subscribed Symbols:", ""]
-        for _, row in df.iterrows():
-            lines.append(f"  {row['exchange_code']}")
+
+        for _, row in exchanges_df.iterrows():
+            exchange_code = row['exchange_code']
+            # Get distinct types for this exchange
+            exchange_symbols = symbols_df[symbols_df['exchange_code'] == exchange_code]
+            types = sorted(exchange_symbols['type'].dropna().unique().tolist())
+            symbol_count = len(exchange_symbols)
+
+            lines.append(f"[{exchange_code}] ({symbol_count} symbols)")
+            lines.append(f"  Types: {', '.join(types)}")
+            lines.append("")
+
+        return [TextContent(type="text", text="\n".join(lines))]
+    finally:
+        db.close()
+
+
+async def handle_get_symbol_types(arguments: dict[str, Any]) -> list[TextContent]:
+    """Get distinct symbol types for a specific exchange."""
+    exchange_code = arguments["exchange_code"].upper()
+
+    db = get_database()
+    try:
+        # Check if exchange exists
+        include_synthetics = (exchange_code == "SYNTHETICS")
+        symbols_df = db.get_subscribed_symbols(
+            exchange_code=exchange_code,
+            include_synthetics=include_synthetics
+        )
+
+        if symbols_df.empty:
+            return [TextContent(
+                type="text",
+                text=f"No subscribed symbols found for exchange: {exchange_code}"
+            )]
+
+        # Get distinct types with counts
+        type_counts = symbols_df['type'].value_counts().sort_index()
+
+        lines = [f"Symbol Types in {exchange_code}:", ""]
+        for symbol_type, count in type_counts.items():
+            lines.append(f"  {symbol_type}: {count} symbols")
 
         return [TextContent(type="text", text="\n".join(lines))]
     finally:
