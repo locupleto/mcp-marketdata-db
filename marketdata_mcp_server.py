@@ -9,6 +9,8 @@ marketdata-db-locupleto package.
 import os
 from typing import Any
 
+import pandas as pd
+
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import (
@@ -156,6 +158,50 @@ async def list_tools() -> list[Tool]:
                 "properties": {}
             }
         ),
+        Tool(
+            name="subscribe_symbol",
+            description="Subscribe to a symbol for EOD data updates. All three parameters are required to avoid ambiguity.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "exchange_code": {
+                        "type": "string",
+                        "description": "Exchange code (e.g., US, LSE, XETRA, CBOE)"
+                    },
+                    "symbol_code": {
+                        "type": "string",
+                        "description": "The symbol code (e.g., AAPL, MSFT, SPY)"
+                    },
+                    "type": {
+                        "type": "string",
+                        "description": "Symbol type (e.g., 'Common Stock', 'ETF', 'Index')"
+                    }
+                },
+                "required": ["exchange_code", "symbol_code", "type"]
+            }
+        ),
+        Tool(
+            name="unsubscribe_symbol",
+            description="Unsubscribe from a symbol to stop EOD data updates. All three parameters are required to avoid ambiguity.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "exchange_code": {
+                        "type": "string",
+                        "description": "Exchange code (e.g., US, LSE, XETRA, CBOE)"
+                    },
+                    "symbol_code": {
+                        "type": "string",
+                        "description": "The symbol code (e.g., AAPL, MSFT, SPY)"
+                    },
+                    "type": {
+                        "type": "string",
+                        "description": "Symbol type (e.g., 'Common Stock', 'ETF', 'Index')"
+                    }
+                },
+                "required": ["exchange_code", "symbol_code", "type"]
+            }
+        ),
     ]
 
 
@@ -175,6 +221,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return await handle_get_symbol_info(arguments)
         elif name == "get_database_status":
             return await handle_get_database_status(arguments)
+        elif name == "subscribe_symbol":
+            return await handle_subscribe_symbol(arguments)
+        elif name == "unsubscribe_symbol":
+            return await handle_unsubscribe_symbol(arguments)
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
     except Exception as e:
@@ -365,6 +415,97 @@ async def handle_get_database_status(arguments: dict[str, Any]) -> list[TextCont
         ]
 
         return [TextContent(type="text", text="\n".join(lines))]
+    finally:
+        db.close()
+
+
+async def handle_subscribe_symbol(arguments: dict[str, Any]) -> list[TextContent]:
+    """Subscribe to a symbol for EOD data updates."""
+    exchange_code = arguments["exchange_code"].upper()
+    symbol_code = arguments["symbol_code"].upper()
+    symbol_type = arguments["type"]
+
+    db = get_database()
+    try:
+        # Verify the symbol exists in subscribed_symbols table
+        df_all = db.get_subscribed_symbols(exchange_code=exchange_code)
+        symbol_row = df_all[
+            (df_all['symbol_code'] == symbol_code) &
+            (df_all['type'] == symbol_type)
+        ]
+
+        if symbol_row.empty:
+            return [TextContent(
+                type="text",
+                text=f"Symbol not found: {exchange_code}/{symbol_type}/{symbol_code}\n"
+                     f"The symbol must exist in the exchange_symbols table first."
+            )]
+
+        # Check if already subscribed
+        if symbol_row['is_subscribed'].iloc[0] != 0:
+            return [TextContent(
+                type="text",
+                text=f"Already subscribed: {exchange_code}/{symbol_type}/{symbol_code}"
+            )]
+
+        # Create DataFrame for start_subscriptions
+        df_subscribe = pd.DataFrame([{
+            'symbol_code': symbol_code,
+            'exchange_code': exchange_code
+        }])
+
+        db.start_subscriptions(df_subscribe)
+
+        return [TextContent(
+            type="text",
+            text=f"Subscribed: {exchange_code}/{symbol_type}/{symbol_code}\n"
+                 f"EOD data will be updated on next refresh."
+        )]
+    finally:
+        db.close()
+
+
+async def handle_unsubscribe_symbol(arguments: dict[str, Any]) -> list[TextContent]:
+    """Unsubscribe from a symbol to stop EOD data updates."""
+    exchange_code = arguments["exchange_code"].upper()
+    symbol_code = arguments["symbol_code"].upper()
+    symbol_type = arguments["type"]
+
+    db = get_database()
+    try:
+        # Verify the symbol exists and is subscribed
+        df_all = db.get_subscribed_symbols(exchange_code=exchange_code)
+        symbol_row = df_all[
+            (df_all['symbol_code'] == symbol_code) &
+            (df_all['type'] == symbol_type)
+        ]
+
+        if symbol_row.empty:
+            return [TextContent(
+                type="text",
+                text=f"Symbol not found: {exchange_code}/{symbol_type}/{symbol_code}"
+            )]
+
+        # Check if already unsubscribed
+        if symbol_row['is_subscribed'].iloc[0] == 0:
+            return [TextContent(
+                type="text",
+                text=f"Already unsubscribed: {exchange_code}/{symbol_type}/{symbol_code}"
+            )]
+
+        # Create DataFrame for stop_subscriptions
+        df_unsubscribe = pd.DataFrame([{
+            'symbol_code': symbol_code,
+            'exchange_code': exchange_code
+        }])
+
+        db.stop_subscriptions(df_unsubscribe)
+
+        return [TextContent(
+            type="text",
+            text=f"Unsubscribed: {exchange_code}/{symbol_type}/{symbol_code}\n"
+                 f"EOD data will no longer be updated."
+        )]
     finally:
         db.close()
 
