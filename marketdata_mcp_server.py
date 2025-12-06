@@ -50,18 +50,21 @@ async def list_tools() -> list[Tool]:
     return [
         Tool(
             name="get_eod_data",
-            description="Get end-of-day OHLCV price data for a symbol. Returns a pandas DataFrame with date, open, high, low, close, adjusted_close, volume.",
+            description="Get end-of-day OHLCV price data for a symbol. All three identifiers (exchange_code, symbol_code, type) are required to avoid ambiguity.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "symbol": {
+                    "exchange_code": {
+                        "type": "string",
+                        "description": "Exchange code (e.g., US, LSE, XETRA, CBOE, SYNTHETICS)"
+                    },
+                    "symbol_code": {
                         "type": "string",
                         "description": "The symbol code (e.g., AAPL, MSFT, VIX)"
                     },
-                    "exchange": {
+                    "type": {
                         "type": "string",
-                        "description": "Exchange code (e.g., US, LSE, XETRA, CBOE, SYNTHETICS)",
-                        "default": "US"
+                        "description": "Symbol type (e.g., 'Common Stock', 'ETF', 'Index')"
                     },
                     "adj_for_splits": {
                         "type": "boolean",
@@ -74,7 +77,7 @@ async def list_tools() -> list[Tool]:
                         "default": 100
                     }
                 },
-                "required": ["symbol"]
+                "required": ["exchange_code", "symbol_code", "type"]
             }
         ),
         Tool(
@@ -133,21 +136,24 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_symbol_info",
-            description="Get sector and industry information for a symbol",
+            description="Get sector and industry information for a symbol. All three identifiers are required to avoid ambiguity.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "symbol": {
+                    "exchange_code": {
                         "type": "string",
-                        "description": "The symbol code"
+                        "description": "Exchange code (e.g., US, LSE, XETRA, CBOE)"
                     },
-                    "exchange": {
+                    "symbol_code": {
                         "type": "string",
-                        "description": "Exchange code (default: US)",
-                        "default": "US"
+                        "description": "The symbol code (e.g., AAPL, MSFT, SPY)"
+                    },
+                    "type": {
+                        "type": "string",
+                        "description": "Symbol type (e.g., 'Common Stock', 'ETF', 'Index')"
                     }
                 },
-                "required": ["symbol"]
+                "required": ["exchange_code", "symbol_code", "type"]
             }
         ),
         Tool(
@@ -233,30 +239,47 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
 async def handle_get_eod_data(arguments: dict[str, Any]) -> list[TextContent]:
     """Get EOD price data for a symbol using the Database class."""
-    symbol = arguments["symbol"].upper()
-    exchange = arguments.get("exchange", "US").upper()
+    exchange_code = arguments["exchange_code"].upper()
+    symbol_code = arguments["symbol_code"].upper()
+    symbol_type = arguments["type"]
     adj_for_splits = arguments.get("adj_for_splits", True)
     limit = arguments.get("limit", 100)
 
     db = get_database()
     try:
+        # Verify the symbol exists with the correct type
+        df_symbols = db.get_subscribed_symbols(exchange_code=exchange_code)
+        symbol_row = df_symbols[
+            (df_symbols['symbol_code'] == symbol_code) &
+            (df_symbols['type'] == symbol_type)
+        ]
+
+        if symbol_row.empty:
+            return [TextContent(
+                type="text",
+                text=f"Symbol not found: {exchange_code}/{symbol_type}/{symbol_code}"
+            )]
+
         # Use the Database class method
-        include_synthetics = (exchange == "SYNTHETICS")
+        include_synthetics = (exchange_code == "SYNTHETICS")
         df = db.get_eod_data(
-            symbol_code=symbol,
-            exchange_code=exchange,
+            symbol_code=symbol_code,
+            exchange_code=exchange_code,
             adj_for_splits=adj_for_splits,
             include_synthetics=include_synthetics
         )
 
         if df is None or df.empty:
-            return [TextContent(type="text", text=f"No data found for {symbol}.{exchange}")]
+            return [TextContent(
+                type="text",
+                text=f"No EOD data found for {exchange_code}/{symbol_type}/{symbol_code}"
+            )]
 
-        # Sort by date descending and limit
-        df = df.sort_values('date', ascending=False).head(limit)
+        # Sort by date descending and limit (use index if date is the index)
+        df = df.sort_index(ascending=False).head(limit)
 
         # Format as table
-        lines = [f"EOD Data for {symbol}.{exchange} ({len(df)} rows):", ""]
+        lines = [f"EOD Data for {exchange_code}/{symbol_type}/{symbol_code} ({len(df)} rows):", ""]
         lines.append("Date       | Open     | High     | Low      | Close    | Volume")
         lines.append("-" * 70)
 
@@ -347,21 +370,32 @@ async def handle_get_subscribed_symbols(arguments: dict[str, Any]) -> list[TextC
 
 async def handle_get_symbol_info(arguments: dict[str, Any]) -> list[TextContent]:
     """Get symbol information (sector/industry)."""
-    symbol = arguments["symbol"].upper()
-    exchange = arguments.get("exchange", "US").upper()
+    exchange_code = arguments["exchange_code"].upper()
+    symbol_code = arguments["symbol_code"].upper()
+    symbol_type = arguments["type"]
 
     db = get_database()
     try:
-        # Get symbol info using the Database class method
-        info = db.get_symbol_info(symbol, exchange)
+        # Verify the symbol exists with the correct type
+        df = db.get_subscribed_symbols(exchange_code=exchange_code)
+        symbol_row = df[
+            (df['symbol_code'] == symbol_code) &
+            (df['type'] == symbol_type)
+        ]
 
-        # Also get the name from subscribed_symbols
-        df = db.get_subscribed_symbols(exchange_code=exchange)
-        symbol_row = df[df['symbol_code'] == symbol]
-        name = symbol_row['name'].iloc[0] if not symbol_row.empty else 'N/A'
+        if symbol_row.empty:
+            return [TextContent(
+                type="text",
+                text=f"Symbol not found: {exchange_code}/{symbol_type}/{symbol_code}"
+            )]
+
+        name = symbol_row['name'].iloc[0] if symbol_row['name'].iloc[0] else 'N/A'
+
+        # Get symbol info using the Database class method
+        info = db.get_symbol_info(symbol_code, exchange_code)
 
         lines = [
-            f"Symbol: {symbol}.{exchange}",
+            f"Symbol: {exchange_code}/{symbol_type}/{symbol_code}",
             f"Name: {name}",
             f"Sector: {info.get('sector', 'N/A')}",
             f"Industry: {info.get('industry', 'N/A')}"
