@@ -4,14 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Model Context Protocol (MCP) server that provides access to a market data SQLite database. It integrates with Claude Code to enable querying financial market data including EOD prices, symbols, exchanges, and index constituents.
+This is a Model Context Protocol (MCP) server that provides access to a market data SQLite database via the `marketdata-db-locupleto` package. It integrates with Claude Code to enable querying financial market data including EOD prices, symbols, exchanges, and subscription management.
 
 ## Prerequisites
 
 - Python 3.10+
-- MCP SDK: `pip install mcp`
 - Access to marketdata.db (path set via `MARKETDATA_DB_PATH` environment variable)
-- EOD API key (set via `EOD_API_KEY` environment variable) - optional, for live data updates
+- EOD API key (set via `EOD_API_KEY` environment variable)
 
 ## Environment Variables
 
@@ -19,7 +18,7 @@ This is a Model Context Protocol (MCP) server that provides access to a market d
 # Required: Path to the SQLite market data database
 export MARKETDATA_DB_PATH=/Volumes/Work/marketdata/marketdata.db
 
-# Optional: EOD Historical Data API key for live updates
+# Required: EOD Historical Data API key
 export EOD_API_KEY=your_api_key_here
 ```
 
@@ -31,10 +30,12 @@ python3 -m venv venv
 source venv/bin/activate
 
 # Install dependencies
-pip install mcp
+pip install -r requirements.txt
 
-# Register with Claude Code (use absolute paths)
-claude mcp add -s user marketdata-db '/absolute/path/to/venv/bin/python3' '/absolute/path/to/marketdata_mcp_server.py'
+# Register with Claude Code (user level - available in all projects)
+claude mcp add -s user marketdata-db \
+    '/Volumes/Work/development/projects/git/mcp-marketdata-db/venv/bin/python3' \
+    '/Volumes/Work/development/projects/git/mcp-marketdata-db/marketdata_mcp_server.py'
 
 # Verify registration
 claude mcp list
@@ -45,19 +46,41 @@ claude --mcp-debug
 
 ## Architecture
 
-The server (`marketdata_mcp_server.py`) is a single-file MCP server implementation using `mcp.server` that provides:
+The server (`marketdata_mcp_server.py`) is a single-file MCP server using `mcp.server` and the `marketdata-db-locupleto` package (NOT raw SQLite queries).
 
-**Tools:**
-- `get_eod_data`: Retrieve end-of-day OHLCV data for a symbol
-- `search_symbols`: Search for symbols by name or code
-- `list_exchanges`: List available exchanges in the database
-- `get_subscribed_symbols`: Get list of actively tracked symbols
-- `get_symbol_info`: Get sector/industry information for a symbol
+### Symbol Identification - The Triplet Rule
 
-**Resources:**
-- `marketdata://schema`: Database schema information
-- `marketdata://exchanges`: List of available exchanges
+**IMPORTANT**: All symbol-specific operations require the full triplet to avoid ambiguity:
+- `exchange_code`: e.g., US, LSE, XETRA, CBOE
+- `symbol_code`: e.g., AAPL, SPY, VIX
+- `type`: e.g., 'Common Stock', 'ETF', 'Index'
+
+Use `list_exchanges` or `get_symbol_types` to discover valid type values.
+
+### Tools (10 total)
+
+**Data Retrieval:**
+- `get_eod_data`: Get OHLCV price data (requires triplet)
+- `search_symbols`: Search symbols by name or code
+- `get_symbol_info`: Get sector/industry info (requires triplet)
+
+**Discovery:**
+- `list_exchanges`: List exchanges with their available symbol types
+- `get_symbol_types`: Get distinct types for a specific exchange
+- `get_subscribed_symbols`: List actively tracked symbols
+
+**Status:**
+- `get_database_status`: Database statistics (size, counts, date range)
+- `get_update_status`: EOD data freshness per exchange/type
+
+**Subscription Management:**
+- `subscribe_symbol`: Start tracking a symbol (requires triplet)
+- `unsubscribe_symbol`: Stop tracking a symbol (requires triplet)
+
+### Resources
+
 - `marketdata://status`: Database status and statistics
+- `marketdata://exchanges`: List of exchanges with symbol types
 
 ## Database Schema
 
@@ -68,6 +91,14 @@ The SQLite database contains these key tables:
 - `eod_data`: End-of-day price data (OHLCV)
 - `splits`: Stock split information
 - `symbol_info`: Sector and industry classification
+
+## Dependencies
+
+Core dependencies (see `requirements.txt`):
+- `mcp`: MCP SDK
+- `marketdata-db-locupleto`: Market data database package
+- `yfinance`: Yahoo Finance data
+- `eod`: EOD Historical Data API
 
 ## Related Projects
 
