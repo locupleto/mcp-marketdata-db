@@ -179,6 +179,14 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
+            name="get_update_status",
+            description="Get the EOD data update status showing latest date and percentage of symbols updated per exchange and type. Useful for checking if market data is current.",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
+        Tool(
             name="subscribe_symbol",
             description="Subscribe to a symbol for EOD data updates. All three parameters are required to avoid ambiguity.",
             inputSchema={
@@ -243,6 +251,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return await handle_get_symbol_info(arguments)
         elif name == "get_database_status":
             return await handle_get_database_status(arguments)
+        elif name == "get_update_status":
+            return await handle_get_update_status(arguments)
         elif name == "subscribe_symbol":
             return await handle_subscribe_symbol(arguments)
         elif name == "unsubscribe_symbol":
@@ -504,6 +514,74 @@ async def handle_get_database_status(arguments: dict[str, Any]) -> list[TextCont
             "",
             f"Date Range: {min_date} to {max_date}",
         ]
+
+        return [TextContent(type="text", text="\n".join(lines))]
+    finally:
+        db.close()
+
+
+async def handle_get_update_status(arguments: dict[str, Any]) -> list[TextContent]:
+    """Get EOD data update status per exchange and type."""
+    db = get_database()
+    try:
+        # SQL query to fetch latest update date and percentage of updated symbols
+        update_status_sql = '''
+        WITH LatestUpdates AS (
+            SELECT
+                exchange_code,
+                MAX(date) AS latest_date
+            FROM eod_data
+            WHERE (symbol_code, exchange_code) IN (
+                SELECT symbol_code, exchange_code
+                FROM subscribed_symbols
+                WHERE is_subscribed = 1
+            )
+            GROUP BY exchange_code
+        ),
+        ExchangeSummary AS (
+            SELECT
+                ex.name,
+                ex.code AS exchange_code,
+                lu.latest_date,
+                ss.type,
+                COUNT(ed.symbol_code) AS updated_count,
+                COUNT(ss.symbol_code) AS total_count
+            FROM exchanges ex
+            JOIN LatestUpdates lu ON ex.code = lu.exchange_code
+            JOIN subscribed_symbols ss ON ss.exchange_code = ex.code AND ss.is_subscribed = 1
+            LEFT JOIN eod_data ed ON ed.symbol_code = ss.symbol_code
+                AND ed.exchange_code = ss.exchange_code
+                AND ed.date = lu.latest_date
+            GROUP BY ex.name, ex.code, lu.latest_date, ss.type
+        )
+        SELECT
+            name AS exchange_name,
+            type AS symbol_type,
+            total_count AS symbols,
+            latest_date,
+            ROUND(100.0 * updated_count / total_count, 2) AS percentage_updated
+        FROM ExchangeSummary
+        ORDER BY exchange_name, symbol_type;
+        '''
+
+        df = db.sql(update_status_sql)
+
+        if df is None or df.empty:
+            return [TextContent(type="text", text="No update status data available")]
+
+        lines = [
+            "EOD Data Update Status",
+            "=" * 80,
+            f"{'Exchange':<25} {'Type':<15} {'Symbols':<10} {'Latest Date':<15} {'Updated':>10}",
+            "-" * 80,
+        ]
+
+        for _, row in df.iterrows():
+            lines.append(
+                f"{row['exchange_name']:<25} {row['symbol_type']:<15} "
+                f"{row['symbols']:<10} {row['latest_date']:<15} "
+                f"{row['percentage_updated']:>9.1f}%"
+            )
 
         return [TextContent(type="text", text="\n".join(lines))]
     finally:
