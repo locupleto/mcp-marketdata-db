@@ -1,0 +1,7 @@
+# MCP Server
+mcp>=1.23.1
+
+# Market Data and Trading
+marketdata-db-locupleto @ git+https://github.com/locupleto/marketdata-db.git@bb7f29c634ddd5bcbd3646e4b9e2708f6fe8f60e
+yfinance>=0.2.65
+eod>=0.2.1
