@@ -230,6 +230,28 @@ async def list_tools() -> list[Tool]:
                 "required": ["exchange_code", "symbol_code", "type"]
             }
         ),
+        Tool(
+            name="get_intraday_quote",
+            description="Get live (15-20 min delayed) intraday quote for a symbol. Returns current price, bid/ask, volume, and other real-time data. Requires EOD_API_KEY environment variable to be set.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "exchange_code": {
+                        "type": "string",
+                        "description": "Exchange code (e.g., US, LSE, XETRA)"
+                    },
+                    "symbol_code": {
+                        "type": "string",
+                        "description": "The symbol code (e.g., AAPL, MSFT, SPY)"
+                    },
+                    "type": {
+                        "type": "string",
+                        "description": "Symbol type (e.g., 'Common Stock', 'ETF', 'Index')"
+                    }
+                },
+                "required": ["exchange_code", "symbol_code", "type"]
+            }
+        ),
     ]
 
 
@@ -257,6 +279,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return await handle_subscribe_symbol(arguments)
         elif name == "unsubscribe_symbol":
             return await handle_unsubscribe_symbol(arguments)
+        elif name == "get_intraday_quote":
+            return await handle_get_intraday_quote(arguments)
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
     except Exception as e:
@@ -674,6 +698,73 @@ async def handle_unsubscribe_symbol(arguments: dict[str, Any]) -> list[TextConte
             type="text",
             text=f"Unsubscribed: {exchange_code}/{symbol_type}/{symbol_code}\n"
                  f"EOD data will no longer be updated."
+        )]
+    finally:
+        db.close()
+
+
+async def handle_get_intraday_quote(arguments: dict[str, Any]) -> list[TextContent]:
+    """Get live (delayed) intraday quote for a symbol."""
+    exchange_code = arguments["exchange_code"].upper()
+    symbol_code = arguments["symbol_code"].upper()
+    symbol_type = arguments["type"]
+
+    # Check if API key is configured
+    if not EOD_API_KEY:
+        return [TextContent(
+            type="text",
+            text="Error: EOD_API_KEY environment variable is not set.\n"
+                 "Intraday quotes require a valid EOD Historical Data API key."
+        )]
+
+    db = get_database()
+    try:
+        # Verify the symbol exists with the correct type
+        df_symbols = db.get_subscribed_symbols(exchange_code=exchange_code)
+        symbol_row = df_symbols[
+            (df_symbols['symbol_code'] == symbol_code) &
+            (df_symbols['type'] == symbol_type)
+        ]
+
+        if symbol_row.empty:
+            return [TextContent(
+                type="text",
+                text=f"Symbol not found: {exchange_code}/{symbol_type}/{symbol_code}"
+            )]
+
+        # Get intraday quote using the Database class method
+        df = db.get_intraday_price(symbol_code, exchange_code)
+
+        if df is None or df.empty:
+            return [TextContent(
+                type="text",
+                text=f"No intraday data available for {exchange_code}/{symbol_type}/{symbol_code}"
+            )]
+
+        # Format as readable output
+        symbol_name = symbol_row['name'].iloc[0] if symbol_row['name'].iloc[0] else symbol_code
+
+        lines = [
+            f"Intraday Quote: {symbol_code}.{exchange_code}",
+            f"Name: {symbol_name}",
+            "=" * 40,
+        ]
+
+        # Extract key fields from the DataFrame (which has 'Column' as index and 'Value' as column)
+        for idx, row in df.iterrows():
+            # Format the field name nicely
+            field_name = str(idx).replace('_', ' ').title()
+            value = row['Value']
+            lines.append(f"{field_name}: {value}")
+
+        lines.append("")
+        lines.append("Note: Data is delayed 15-20 minutes")
+
+        return [TextContent(type="text", text="\n".join(lines))]
+    except Exception as e:
+        return [TextContent(
+            type="text",
+            text=f"Error fetching intraday quote: {str(e)}"
         )]
     finally:
         db.close()
