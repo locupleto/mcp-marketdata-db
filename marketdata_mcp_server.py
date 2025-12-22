@@ -247,6 +247,11 @@ async def list_tools() -> list[Tool]:
                     "type": {
                         "type": "string",
                         "description": "Symbol type (e.g., 'Common Stock', 'ETF', 'Index')"
+                    },
+                    "return_json": {
+                        "type": "boolean",
+                        "description": "If true, return structured JSON response (for n8n integration). Default: false",
+                        "default": False
                     }
                 },
                 "required": ["exchange_code", "symbol_code", "type"]
@@ -705,69 +710,155 @@ async def handle_unsubscribe_symbol(arguments: dict[str, Any]) -> list[TextConte
 
 async def handle_get_intraday_quote(arguments: dict[str, Any]) -> list[TextContent]:
     """Get live (delayed) intraday quote for a symbol."""
-    exchange_code = arguments["exchange_code"].upper()
-    symbol_code = arguments["symbol_code"].upper()
-    symbol_type = arguments["type"]
+    import json
 
-    # Check if API key is configured
-    if not EOD_API_KEY:
-        return [TextContent(
-            type="text",
-            text="Error: EOD_API_KEY environment variable is not set.\n"
-                 "Intraday quotes require a valid EOD Historical Data API key."
-        )]
+    # Extract return_json parameter before validation
+    return_json = arguments.get("return_json", False)
 
-    db = get_database()
     try:
-        # Verify the symbol exists with the correct type
-        df_symbols = db.get_subscribed_symbols(exchange_code=exchange_code)
-        symbol_row = df_symbols[
-            (df_symbols['symbol_code'] == symbol_code) &
-            (df_symbols['type'] == symbol_type)
-        ]
+        # === VALIDATION ERRORS ===
+        exchange_code = arguments.get("exchange_code", "").upper()
+        symbol_code = arguments.get("symbol_code", "").upper()
+        symbol_type = arguments.get("type", "")
 
-        if symbol_row.empty:
-            return [TextContent(
-                type="text",
-                text=f"Symbol not found: {exchange_code}/{symbol_type}/{symbol_code}"
-            )]
+        if not exchange_code or not symbol_code or not symbol_type:
+            error_response = {
+                "status": "error",
+                "error_type": "validation",
+                "message": "Missing required parameters: exchange_code, symbol_code, and type are all required",
+                "symbol": f"{exchange_code}_{symbol_type.replace(' ', '_')}_{symbol_code}" if exchange_code and symbol_code else None,
+                "data": None
+            }
+            return [TextContent(type="text", text=json.dumps(error_response))]
 
-        # Get intraday quote using the Database class method
-        df = db.get_intraday_price(symbol_code, exchange_code)
+        # Check if API key is configured
+        if not EOD_API_KEY:
+            error_response = {
+                "status": "error",
+                "error_type": "validation",
+                "message": "EOD_API_KEY environment variable is not set. Intraday quotes require a valid API key.",
+                "symbol": f"{exchange_code}_{symbol_type.replace(' ', '_')}_{symbol_code}",
+                "data": None
+            }
+            return [TextContent(type="text", text=json.dumps(error_response))]
 
-        if df is None or df.empty:
-            return [TextContent(
-                type="text",
-                text=f"No intraday data available for {exchange_code}/{symbol_type}/{symbol_code}"
-            )]
+        db = get_database()
+        try:
+            # === DATA ERRORS ===
+            # Verify the symbol exists with the correct type
+            df_symbols = db.get_subscribed_symbols(exchange_code=exchange_code)
+            symbol_row = df_symbols[
+                (df_symbols['symbol_code'] == symbol_code) &
+                (df_symbols['type'] == symbol_type)
+            ]
 
-        # Format as readable output
-        symbol_name = symbol_row['name'].iloc[0] if symbol_row['name'].iloc[0] else symbol_code
+            if symbol_row.empty:
+                error_response = {
+                    "status": "error",
+                    "error_type": "data",
+                    "message": f"Symbol not found in database: {exchange_code}/{symbol_type}/{symbol_code}",
+                    "symbol": f"{exchange_code}_{symbol_type.replace(' ', '_')}_{symbol_code}",
+                    "data": None
+                }
+                return [TextContent(type="text", text=json.dumps(error_response))]
 
-        lines = [
-            f"Intraday Quote: {symbol_code}.{exchange_code}",
-            f"Name: {symbol_name}",
-            "=" * 40,
-        ]
+            # Get intraday quote using the Database class method
+            df = db.get_intraday_price(symbol_code, exchange_code)
 
-        # Extract key fields from the DataFrame (which has 'Column' as index and 'Value' as column)
-        for idx, row in df.iterrows():
-            # Format the field name nicely
-            field_name = str(idx).replace('_', ' ').title()
-            value = row['Value']
-            lines.append(f"{field_name}: {value}")
+            if df is None or df.empty:
+                error_response = {
+                    "status": "error",
+                    "error_type": "data",
+                    "message": f"No intraday data available for {exchange_code}/{symbol_type}/{symbol_code}",
+                    "symbol": f"{exchange_code}_{symbol_type.replace(' ', '_')}_{symbol_code}",
+                    "data": None
+                }
+                return [TextContent(type="text", text=json.dumps(error_response))]
 
-        lines.append("")
-        lines.append("Note: Data is delayed 15-20 minutes")
+            # === SUCCESS - Build response ===
+            symbol_name = symbol_row['name'].iloc[0] if symbol_row['name'].iloc[0] else symbol_code
 
-        return [TextContent(type="text", text="\n".join(lines))]
+            # Convert DataFrame to dict for JSON response
+            quote_data = {}
+            for idx, row in df.iterrows():
+                field_name = str(idx)
+                quote_data[field_name] = row['Value']
+
+            # Build structured JSON response
+            result = {
+                "status": "success",
+                "symbol": f"{exchange_code}_{symbol_type.replace(' ', '_')}_{symbol_code}",
+                "name": symbol_name,
+                "data": quote_data,
+                "metadata": {
+                    "exchange": exchange_code,
+                    "type": symbol_type,
+                    "delay_notice": "Data is delayed 15-20 minutes",
+                    "source": "EOD Historical Data API"
+                }
+            }
+
+            # Return based on mode
+            if return_json:
+                # n8n mode: return only JSON
+                return [TextContent(type="text", text=json.dumps(result))]
+            else:
+                # Interactive mode: return formatted message + JSON
+                lines = [
+                    f"Intraday Quote: {symbol_code}.{exchange_code}",
+                    f"Name: {symbol_name}",
+                    "=" * 40,
+                ]
+
+                for field_name, value in quote_data.items():
+                    display_name = field_name.replace('_', ' ').title()
+                    lines.append(f"{display_name}: {value}")
+
+                lines.append("")
+                lines.append("Note: Data is delayed 15-20 minutes")
+                lines.append("")
+                lines.append("JSON Response:")
+                lines.append(json.dumps(result, indent=2))
+
+                return [TextContent(type="text", text="\n".join(lines))]
+
+        finally:
+            db.close()
+
+    except ValueError as e:
+        # Validation errors we didn't catch above
+        error_response = {
+            "status": "error",
+            "error_type": "validation",
+            "message": str(e),
+            "symbol": f"{arguments.get('exchange_code', '')}_{arguments.get('type', '').replace(' ', '_')}_{arguments.get('symbol_code', '')}",
+            "data": None
+        }
+        return [TextContent(type="text", text=json.dumps(error_response))]
+
+    except FileNotFoundError as e:
+        # Data availability errors
+        error_response = {
+            "status": "error",
+            "error_type": "data",
+            "message": f"Database or data not found: {str(e)}",
+            "symbol": f"{arguments.get('exchange_code', '')}_{arguments.get('type', '').replace(' ', '_')}_{arguments.get('symbol_code', '')}",
+            "data": None
+        }
+        return [TextContent(type="text", text=json.dumps(error_response))]
+
     except Exception as e:
-        return [TextContent(
-            type="text",
-            text=f"Error fetching intraday quote: {str(e)}"
-        )]
-    finally:
-        db.close()
+        # System errors
+        import traceback
+        error_response = {
+            "status": "error",
+            "error_type": "system",
+            "message": f"Unexpected error fetching intraday quote: {str(e)}",
+            "symbol": f"{arguments.get('exchange_code', '')}_{arguments.get('type', '').replace(' ', '_')}_{arguments.get('symbol_code', '')}",
+            "data": None,
+            "details": traceback.format_exc() if not return_json else None
+        }
+        return [TextContent(type="text", text=json.dumps(error_response))]
 
 
 @server.list_resources()
