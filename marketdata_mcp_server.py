@@ -7,7 +7,9 @@ marketdata-db-locupleto package.
 """
 
 import os
-from typing import Any
+import json
+import difflib
+from typing import Any, List, Tuple, Optional
 
 import pandas as pd
 
@@ -42,6 +44,79 @@ def get_database() -> Database:
     api_license = EOD_API_KEY if EOD_API_KEY else None
     db.open(database_file=MARKETDATA_DB_PATH, api_license=api_license)
     return db
+
+
+# Fuzzy matching utilities for symbol validation
+def fuzzy_match_symbols(query: str, options: List[str], cutoff: float = 0.6) -> List[Tuple[str, float]]:
+    """
+    Fuzzy match query against list of symbol codes or names.
+    Returns list of (match, confidence_score) tuples sorted by confidence.
+    """
+    matches = difflib.get_close_matches(query, options, n=5, cutoff=cutoff)
+    scored_matches = []
+    for match in matches:
+        score = difflib.SequenceMatcher(None, query.lower(), match.lower()).ratio()
+        scored_matches.append((match, score))
+    return sorted(scored_matches, key=lambda x: x[1], reverse=True)
+
+
+def detect_swedish_company(query: str) -> bool:
+    """
+    Detect if query likely refers to a Swedish company.
+    Heuristics: ends with AB, contains Swedish company names, etc.
+    """
+    swedish_indicators = [
+        'AB', 'Ericsson', 'Volvo', 'H&M', 'Hennes', 'Mauritz',
+        'Electrolux', 'Sandvik', 'Atlas Copco', 'ABB', 'Alfa Laval'
+    ]
+    query_upper = query.upper()
+    return any(indicator.upper() in query_upper for indicator in swedish_indicators)
+
+
+def prioritize_matches(matches: List[dict], prefer_us: bool = True) -> List[dict]:
+    """
+    Prioritize symbol matches based on exchange and type.
+
+    Priority order (if prefer_us=True):
+    1. US Common Stock
+    2. US ETF
+    3. CBOE Index
+    4. ST (Sweden) stocks
+    5. Others
+
+    If prefer_us=False (Swedish query detected):
+    1. ST stocks
+    2. US Common Stock
+    3. US ETF
+    4. Others
+    """
+    def priority_score(match: dict) -> int:
+        exchange = match.get('exchange_code', '')
+        sym_type = match.get('type', '')
+
+        if prefer_us:
+            if exchange == 'US' and sym_type == 'Common Stock':
+                return 100
+            elif exchange == 'US' and sym_type == 'ETF':
+                return 90
+            elif exchange == 'CBOE' and sym_type == 'Index':
+                return 80
+            elif exchange == 'ST':
+                return 70
+            else:
+                return 50
+        else:
+            # Swedish companies prioritized
+            if exchange == 'ST':
+                return 100
+            elif exchange == 'US' and sym_type == 'Common Stock':
+                return 90
+            elif exchange == 'US' and sym_type == 'ETF':
+                return 80
+            else:
+                return 50
+
+    return sorted(matches, key=priority_score, reverse=True)
 
 
 @server.list_tools()
@@ -98,6 +173,29 @@ async def list_tools() -> list[Tool]:
                         "type": "integer",
                         "description": "Maximum results (default 50)",
                         "default": 50
+                    }
+                },
+                "required": ["query"]
+            }
+        ),
+        Tool(
+            name="validate_symbol",
+            description=(
+                "Validate a symbol query with fuzzy matching and smart defaults. "
+                "Handles typos, case-insensitive matching, company names, and ticker symbols. "
+                "Returns best match with confidence score and suggestions."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Symbol code or company name (e.g., 'aapl', 'Apple', 'spy')"
+                    },
+                    "return_suggestions": {
+                        "type": "boolean",
+                        "description": "Return top 5 suggestions even if confidence < 100% (default: true)",
+                        "default": True
                     }
                 },
                 "required": ["query"]
@@ -268,6 +366,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return await handle_get_eod_data(arguments)
         elif name == "search_symbols":
             return await handle_search_symbols(arguments)
+        elif name == "validate_symbol":
+            return await handle_validate_symbol(arguments)
         elif name == "list_exchanges":
             return await handle_list_exchanges(arguments)
         elif name == "get_symbol_types":
@@ -379,6 +479,182 @@ async def handle_search_symbols(arguments: dict[str, Any]) -> list[TextContent]:
             lines.append(f"{row['symbol_code']}.{row['exchange_code']}: {name[:50]}")
 
         return [TextContent(type="text", text="\n".join(lines))]
+    finally:
+        db.close()
+
+
+async def handle_validate_symbol(arguments: dict[str, Any]) -> list[TextContent]:
+    """
+    Validate a symbol query with fuzzy matching and smart defaults.
+
+    Args:
+        query: Symbol code or company name (case-insensitive)
+        return_suggestions: If True, return top matches even if not perfect
+
+    Returns:
+        JSON with:
+        {
+            "valid": bool,
+            "matched_symbol": str,  # Best match symbol code
+            "exchange_code": str,
+            "type": str,
+            "name": str,  # Full company name
+            "confidence": float,  # 0.0-1.0
+            "suggestions": [  # If confidence < 1.0
+                {"symbol_code": str, "exchange_code": str, "type": str, "name": str, "confidence": float}
+            ]
+        }
+    """
+    query = arguments["query"]
+    return_suggestions = arguments.get("return_suggestions", True)
+
+    db = get_database()
+    try:
+        # Get all subscribed symbols
+        all_symbols = db.get_subscribed_symbols()
+
+        if all_symbols.empty:
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "valid": False,
+                    "error": "No symbols available in database",
+                    "confidence": 0.0
+                }, indent=2)
+            )]
+
+        # Detect if query is likely Swedish
+        is_swedish_query = detect_swedish_company(query)
+
+        # Search by symbol code (exact match first)
+        exact_symbol_match = all_symbols[
+            all_symbols['symbol_code'].str.upper() == query.upper()
+        ]
+
+        if not exact_symbol_match.empty:
+            # Exact match found - prioritize
+            matches = prioritize_matches(
+                exact_symbol_match.to_dict('records'),
+                prefer_us=not is_swedish_query
+            )
+            best_match = matches[0]
+
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "valid": True,
+                    "matched_symbol": best_match['symbol_code'],
+                    "exchange_code": best_match['exchange_code'],
+                    "type": best_match['type'],
+                    "name": best_match['name'],
+                    "confidence": 1.0,
+                    "suggestions": []
+                }, indent=2)
+            )]
+
+        # Search by company name (exact match)
+        exact_name_match = all_symbols[
+            all_symbols['name'].str.upper() == query.upper()
+        ]
+
+        if not exact_name_match.empty:
+            matches = prioritize_matches(
+                exact_name_match.to_dict('records'),
+                prefer_us=not is_swedish_query
+            )
+            best_match = matches[0]
+
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "valid": True,
+                    "matched_symbol": best_match['symbol_code'],
+                    "exchange_code": best_match['exchange_code'],
+                    "type": best_match['type'],
+                    "name": best_match['name'],
+                    "confidence": 1.0,
+                    "suggestions": []
+                }, indent=2)
+            )]
+
+        # No exact match - try fuzzy matching
+
+        # Fuzzy match on symbol codes
+        symbol_codes = all_symbols['symbol_code'].tolist()
+        symbol_fuzzy_matches = fuzzy_match_symbols(query, symbol_codes, cutoff=0.5)
+
+        # Fuzzy match on company names
+        company_names = all_symbols['name'].tolist()
+        name_fuzzy_matches = fuzzy_match_symbols(query, company_names, cutoff=0.5)
+
+        # Combine matches
+        all_fuzzy_matches = []
+
+        for match_text, confidence in symbol_fuzzy_matches:
+            match_row = all_symbols[all_symbols['symbol_code'] == match_text].iloc[0]
+            all_fuzzy_matches.append({
+                'symbol_code': match_row['symbol_code'],
+                'exchange_code': match_row['exchange_code'],
+                'type': match_row['type'],
+                'name': match_row['name'],
+                'confidence': confidence,
+                'match_type': 'symbol'
+            })
+
+        for match_text, confidence in name_fuzzy_matches:
+            match_row = all_symbols[all_symbols['name'] == match_text].iloc[0]
+            all_fuzzy_matches.append({
+                'symbol_code': match_row['symbol_code'],
+                'exchange_code': match_row['exchange_code'],
+                'type': match_row['type'],
+                'name': match_row['name'],
+                'confidence': confidence,
+                'match_type': 'name'
+            })
+
+        if not all_fuzzy_matches:
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "valid": False,
+                    "error": f"No matches found for '{query}'",
+                    "confidence": 0.0,
+                    "suggestions": []
+                }, indent=2)
+            )]
+
+        # Sort by confidence, then prioritize by exchange/type
+        all_fuzzy_matches = sorted(all_fuzzy_matches, key=lambda x: x['confidence'], reverse=True)
+        all_fuzzy_matches = prioritize_matches(all_fuzzy_matches, prefer_us=not is_swedish_query)
+
+        # Best match
+        best_match = all_fuzzy_matches[0]
+
+        # Prepare suggestions (top 5)
+        suggestions = [
+            {
+                "symbol_code": m['symbol_code'],
+                "exchange_code": m['exchange_code'],
+                "type": m['type'],
+                "name": m['name'],
+                "confidence": m['confidence']
+            }
+            for m in all_fuzzy_matches[:5]
+        ]
+
+        return [TextContent(
+            type="text",
+            text=json.dumps({
+                "valid": best_match['confidence'] >= 0.5,
+                "matched_symbol": best_match['symbol_code'],
+                "exchange_code": best_match['exchange_code'],
+                "type": best_match['type'],
+                "name": best_match['name'],
+                "confidence": best_match['confidence'],
+                "suggestions": suggestions if best_match['confidence'] < 1.0 else []
+            }, indent=2)
+        )]
+
     finally:
         db.close()
 
