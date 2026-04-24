@@ -901,28 +901,30 @@ async def handle_subscribe_symbol(arguments: dict[str, Any]) -> list[TextContent
 
     db = get_database()
     try:
-        # Verify the symbol exists in subscribed_symbols table
-        df_all = db.get_subscribed_symbols(exchange_code=exchange_code)
-        symbol_row = df_all[
-            (df_all['symbol_code'] == symbol_code) &
-            (df_all['type'] == symbol_type)
-        ]
-
-        if symbol_row.empty:
+        # Validate against the exchange_symbols master table — subscribed_symbols
+        # only contains already-subscribed symbols, so it cannot vouch for the
+        # existence of a NEW symbol the caller is asking us to subscribe to.
+        master = db.sql(
+            f"SELECT 1 FROM exchange_symbols "
+            f"WHERE code = '{symbol_code}' "
+            f"AND exchange_code = '{exchange_code}' "
+            f"AND type = '{symbol_type}' LIMIT 1"
+        )
+        if master.empty:
             return [TextContent(
                 type="text",
-                text=f"Symbol not found: {exchange_code}/{symbol_type}/{symbol_code}\n"
-                     f"The symbol must exist in the exchange_symbols table first."
+                text=f"Symbol not found in exchange_symbols: {exchange_code}/{symbol_type}/{symbol_code}\n"
+                     f"If you expect this symbol to exist, run update_symbol_universe.sh "
+                     f"on Mac mini to refresh the master symbol list."
             )]
 
-        # Check if already subscribed
-        if symbol_row['is_subscribed'].iloc[0] != 0:
+        existing = db.get_subscribed_symbols(exchange_code=exchange_code, type=symbol_type)
+        if not existing[existing['symbol_code'] == symbol_code].empty:
             return [TextContent(
                 type="text",
                 text=f"Already subscribed: {exchange_code}/{symbol_type}/{symbol_code}"
             )]
 
-        # Create DataFrame for start_subscriptions
         df_subscribe = pd.DataFrame([{
             'symbol_code': symbol_code,
             'exchange_code': exchange_code
