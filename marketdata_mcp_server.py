@@ -894,48 +894,68 @@ async def handle_get_update_status(arguments: dict[str, Any]) -> list[TextConten
 
 
 async def handle_subscribe_symbol(arguments: dict[str, Any]) -> list[TextContent]:
-    """Subscribe to a symbol for EOD data updates."""
+    """Subscribe to a symbol AND immediately fetch its full historical EOD data.
+
+    Uses Database.subscribe_and_fetch_symbol() which:
+      1. Validates the symbol exists in exchange_symbols
+      2. Inserts (or updates) the subscribed_symbols row with is_subscribed=1
+      3. Calls the EOD provider API to fetch the symbol's full price history
+      4. Appends the rows to eod_data (UNIQUE constraint on (symbol,exchange,date)
+         deduplicates if the symbol was already partially populated)
+
+    Idempotent: safe to call on already-subscribed symbols — re-fetches any
+    missing history without creating duplicates.
+    """
     exchange_code = arguments["exchange_code"].upper()
     symbol_code = arguments["symbol_code"].upper()
     symbol_type = arguments["type"]
 
     db = get_database()
     try:
-        # Validate against the exchange_symbols master table — subscribed_symbols
-        # only contains already-subscribed symbols, so it cannot vouch for the
-        # existence of a NEW symbol the caller is asking us to subscribe to.
-        master = db.sql(
-            f"SELECT 1 FROM exchange_symbols "
-            f"WHERE code = '{symbol_code}' "
-            f"AND exchange_code = '{exchange_code}' "
-            f"AND type = '{symbol_type}' LIMIT 1"
-        )
-        if master.empty:
+        # Check current subscription + data state so we can give a clear report
+        existing_subs = db.get_subscribed_symbols(exchange_code=exchange_code, type=symbol_type)
+        already_subscribed = not existing_subs[existing_subs['symbol_code'] == symbol_code].empty
+
+        existing_rows = db.sql(
+            f"SELECT COUNT(*) AS n FROM eod_data "
+            f"WHERE symbol_code = '{symbol_code}' "
+            f"AND exchange_code = '{exchange_code}'"
+        ).iloc[0]['n']
+
+        # If fully populated already, skip the API round-trip
+        if already_subscribed and existing_rows > 0:
             return [TextContent(
                 type="text",
-                text=f"Symbol not found in exchange_symbols: {exchange_code}/{symbol_type}/{symbol_code}\n"
-                     f"If you expect this symbol to exist, run update_symbol_universe.sh "
-                     f"on Mac mini to refresh the master symbol list."
+                text=f"Already subscribed with data: "
+                     f"{exchange_code}/{symbol_type}/{symbol_code} "
+                     f"({existing_rows} EOD rows)\n"
+                     f"To force a re-fetch, unsubscribe and re-subscribe."
             )]
 
-        existing = db.get_subscribed_symbols(exchange_code=exchange_code, type=symbol_type)
-        if not existing[existing['symbol_code'] == symbol_code].empty:
+        # Either new subscription OR subscribed-but-empty — fetch full history.
+        # subscribe_and_fetch_symbol raises ValueError if the symbol isn't in
+        # exchange_symbols, which we relay to the caller.
+        try:
+            num_rows = db.subscribe_and_fetch_symbol(
+                symbol_code=symbol_code,
+                exchange_code=exchange_code,
+            )
+        except ValueError as e:
             return [TextContent(
                 type="text",
-                text=f"Already subscribed: {exchange_code}/{symbol_type}/{symbol_code}"
+                text=f"Symbol not found in exchange_symbols: "
+                     f"{exchange_code}/{symbol_type}/{symbol_code}\n"
+                     f"If you expect this symbol to exist, run "
+                     f"update_symbol_universe.sh on Mac mini to refresh the "
+                     f"master symbol list.\n\nDetails: {e}"
             )]
 
-        df_subscribe = pd.DataFrame([{
-            'symbol_code': symbol_code,
-            'exchange_code': exchange_code
-        }])
-
-        db.start_subscriptions(df_subscribe)
-
+        verb = "Re-fetched history for previously empty subscription" \
+            if already_subscribed else "Subscribed and fetched history"
         return [TextContent(
             type="text",
-            text=f"Subscribed: {exchange_code}/{symbol_type}/{symbol_code}\n"
-                 f"EOD data will be updated on next refresh."
+            text=f"{verb}: {exchange_code}/{symbol_type}/{symbol_code}\n"
+                 f"{num_rows} EOD rows inserted from the provider API."
         )]
     finally:
         db.close()
