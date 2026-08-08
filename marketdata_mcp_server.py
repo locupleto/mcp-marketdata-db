@@ -19,6 +19,11 @@ from mcp.types import (
     Tool,
     TextContent,
     Resource,
+    CallToolResult,
+    ListToolsResult,
+    ListResourcesResult,
+    ReadResourceResult,
+    TextResourceContents,
 )
 
 from marketdata.database import Database
@@ -27,9 +32,6 @@ from marketdata.database import Database
 # Environment variables
 MARKETDATA_DB_PATH = os.environ.get("MARKETDATA_DB_PATH", "")
 EOD_API_KEY = os.environ.get("EOD_API_KEY", "")
-
-# Initialize MCP server
-server = Server("marketdata-db")
 
 
 def get_database() -> Database:
@@ -119,7 +121,6 @@ def prioritize_matches(matches: List[dict], prefer_us: bool = True) -> List[dict
     return sorted(matches, key=priority_score, reverse=True)
 
 
-@server.list_tools()
 async def list_tools() -> list[Tool]:
     """List available tools."""
     return [
@@ -358,7 +359,6 @@ async def list_tools() -> list[Tool]:
     ]
 
 
-@server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     """Handle tool calls."""
     try:
@@ -1159,7 +1159,6 @@ async def handle_get_intraday_quote(arguments: dict[str, Any]) -> list[TextConte
         return [TextContent(type="text", text=json.dumps(error_response))]
 
 
-@server.list_resources()
 async def list_resources() -> list[Resource]:
     """List available resources."""
     return [
@@ -1178,7 +1177,6 @@ async def list_resources() -> list[Resource]:
     ]
 
 
-@server.read_resource()
 async def read_resource(uri: str) -> str:
     """Read a resource."""
     if uri == "marketdata://status":
@@ -1189,6 +1187,53 @@ async def read_resource(uri: str) -> str:
         return result[0].text
     else:
         raise ValueError(f"Unknown resource: {uri}")
+
+
+# --- MCP SDK 2.x adapters ----------------------------------------------------
+# list_tools()/call_tool()/list_resources()/read_resource() above keep their
+# v1 signatures so tests and scripts can import and call them directly. These
+# thin adapters bridge them to the SDK 2.x handler contract (ctx/params in,
+# *Result models out) and restore v1 error semantics: any exception from the
+# legacy tool handler becomes CallToolResult(is_error=True, text=str(e)) —
+# readable by the model — instead of an opaque JSON-RPC internal error.
+
+async def _on_list_tools(ctx, params) -> ListToolsResult:
+    return ListToolsResult(tools=await list_tools())
+
+
+async def _on_call_tool(ctx, params) -> CallToolResult:
+    try:
+        content = await call_tool(params.name, params.arguments or {})
+        return CallToolResult(content=list(content), is_error=False)
+    except Exception as e:
+        return CallToolResult(
+            content=[TextContent(type="text", text=str(e))],
+            is_error=True,
+        )
+
+
+async def _on_list_resources(ctx, params) -> ListResourcesResult:
+    return ListResourcesResult(resources=await list_resources())
+
+
+async def _on_read_resource(ctx, params) -> ReadResourceResult:
+    # v1 auto-wrapped a returned str as text/plain contents; reproduce that.
+    text = await read_resource(params.uri)
+    return ReadResourceResult(
+        contents=[
+            TextResourceContents(uri=params.uri, mime_type="text/plain", text=text)
+        ]
+    )
+
+
+server = Server(
+    "marketdata-db",
+    version="1.0.0",
+    on_list_tools=_on_list_tools,
+    on_call_tool=_on_call_tool,
+    on_list_resources=_on_list_resources,
+    on_read_resource=_on_read_resource,
+)
 
 
 async def main():
