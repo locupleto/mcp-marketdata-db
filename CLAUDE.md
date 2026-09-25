@@ -57,7 +57,7 @@ The server (`marketdata_mcp_server.py`) is a single-file MCP server using `mcp.s
 
 Use `list_exchanges` or `get_symbol_types` to discover valid type values.
 
-### Tools (10 total)
+### Tools (15 total)
 
 **Data Retrieval:**
 - `get_eod_data`: Get OHLCV price data (requires triplet)
@@ -72,6 +72,11 @@ Use `list_exchanges` or `get_symbol_types` to discover valid type values.
 **Status:**
 - `get_database_status`: Database statistics (size, counts, date range)
 - `get_update_status`: EOD data freshness per exchange/type
+
+**Macro series (FRED/ALFRED, read-only):**
+- `list_macro_series`: Stored series with coverage and earliest vintage
+- `get_macro_series`: Current, first-release, or point-in-time (`as_of`) values
+- `get_macro_revisions`: Revision history of one observation
 
 **Subscription Management:**
 - `subscribe_symbol`: Start tracking a symbol (requires triplet)
@@ -91,6 +96,7 @@ The SQLite database contains these key tables:
 - `eod_data`: End-of-day price data (OHLCV)
 - `splits`: Stock split information
 - `symbol_info`: Sector and industry classification
+- `macro_series` / `macro_observations`: FRED/ALFRED macro series with vintages (schema 1.25+)
 
 ## Dependencies
 

@@ -330,6 +330,66 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
+            name="list_macro_series",
+            description="List the FRED/ALFRED macro series stored in the database (GDP, CPI, payrolls, yields, ...): id, title, frequency, units, seasonal adjustment, whether full revision history (vintages) is kept, observation date range, earliest stored vintage, and FRED's last update time.",
+            inputSchema={"type": "object", "properties": {}}
+        ),
+        Tool(
+            name="get_macro_series",
+            description="Get a FRED macro series by FRED id (e.g. GDPC1, CPIAUCSL, PAYEMS, DGS10). Default returns today's (revised) values. Pass as_of='YYYY-MM-DD' for point-in-time values exactly as published on that day (ALFRED vintages; returns nothing for dates before the series' earliest stored vintage), or release='first' for each observation's first-published value. Use list_macro_series to discover ids.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "series_id": {
+                        "type": "string",
+                        "description": "FRED series id, e.g. GDPC1"
+                    },
+                    "as_of": {
+                        "type": "string",
+                        "description": "Optional point-in-time date YYYY-MM-DD: values as published on that day"
+                    },
+                    "release": {
+                        "type": "string",
+                        "enum": ["current", "first"],
+                        "description": "current (default) = latest revised values; first = first-published value per observation. Ignored when as_of is given.",
+                        "default": "current"
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": "Optional first observation date YYYY-MM-DD"
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "Optional last observation date YYYY-MM-DD"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of rows to return (default 60, most recent first)",
+                        "default": 60
+                    }
+                },
+                "required": ["series_id"]
+            }
+        ),
+        Tool(
+            name="get_macro_revisions",
+            description="Show the full revision history of one observation of a FRED macro series, e.g. how Q1-2020 real GDP (GDPC1, 2020-01-01) was published and then revised over time. Only meaningful for series stored with vintages (see list_macro_series).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "series_id": {
+                        "type": "string",
+                        "description": "FRED series id, e.g. GDPC1"
+                    },
+                    "observation_date": {
+                        "type": "string",
+                        "description": "Observation date YYYY-MM-DD as FRED dates it (period start: Q2 = YYYY-04-01, a month = YYYY-MM-01)"
+                    }
+                },
+                "required": ["series_id", "observation_date"]
+            }
+        ),
+        Tool(
             name="get_intraday_quote",
             description="Get live (15-20 min delayed) intraday quote for a symbol. Returns current price, bid/ask, volume, and other real-time data. Requires EOD_API_KEY environment variable to be set.",
             inputSchema={
@@ -386,6 +446,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return await handle_unsubscribe_symbol(arguments)
         elif name == "get_intraday_quote":
             return await handle_get_intraday_quote(arguments)
+        elif name == "list_macro_series":
+            return await handle_list_macro_series(arguments)
+        elif name == "get_macro_series":
+            return await handle_get_macro_series(arguments)
+        elif name == "get_macro_revisions":
+            return await handle_get_macro_revisions(arguments)
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
     except Exception as e:
@@ -1002,6 +1068,151 @@ async def handle_unsubscribe_symbol(arguments: dict[str, Any]) -> list[TextConte
             text=f"Unsubscribed: {exchange_code}/{symbol_type}/{symbol_code}\n"
                  f"EOD data will no longer be updated."
         )]
+    finally:
+        db.close()
+
+
+def _format_macro_value(value) -> str:
+    """Format a macro observation value; NULL/NaN (FRED '.') shows as n/a."""
+    if value is None or pd.isna(value):
+        return "n/a"
+    return f"{value:,.4f}".rstrip("0").rstrip(".")
+
+
+def _macro_series_meta(db: Database, series_id: str) -> Optional[dict]:
+    """Return the macro_series row for series_id as a dict, or None."""
+    df = db.get_macro_series_info(subscribed_only=False)
+    row = df[df['series_id'] == series_id]
+    if row.empty:
+        return None
+    return row.iloc[0].to_dict()
+
+
+async def handle_list_macro_series(arguments: dict[str, Any]) -> list[TextContent]:
+    """List stored FRED/ALFRED macro series with coverage."""
+    db = get_database()
+    try:
+        df_info = db.get_macro_series_info(subscribed_only=False)
+        if df_info.empty:
+            return [TextContent(type="text", text="No macro series in the database.")]
+
+        df_cov = db.sql(
+            "SELECT series_id, MIN(date) AS first_date, MAX(date) AS last_date, "
+            "MIN(realtime_start) AS first_vintage "
+            "FROM macro_observations GROUP BY series_id")
+        df = df_info.merge(df_cov, on='series_id', how='left')
+
+        lines = [f"Macro series ({len(df)}):", ""]
+        lines.append("Series | Freq | Vintages | Observations | Earliest vintage | Units | Title")
+        lines.append("-" * 100)
+        for _, r in df.iterrows():
+            vint = "yes" if r['keep_vintages'] else "latest only"
+            sub = "" if r['is_subscribed'] else " (unsubscribed)"
+            sa = f", {r['seasonal_adjustment']}" if r['seasonal_adjustment'] else ""
+            lines.append(
+                f"{r['series_id']}{sub} | {r['frequency']} | {vint} | "
+                f"{r['first_date']} .. {r['last_date']} | {r['first_vintage']} | "
+                f"{r['units']}{sa} | {r['title']}")
+        lines.append("")
+        lines.append("Point-in-time (as_of) queries cannot reach before a series' earliest vintage.")
+        return [TextContent(type="text", text="\n".join(lines))]
+    finally:
+        db.close()
+
+
+async def handle_get_macro_series(arguments: dict[str, Any]) -> list[TextContent]:
+    """Get a macro series: current, first-release, or point-in-time values."""
+    series_id = arguments["series_id"].upper()
+    as_of = arguments.get("as_of")
+    release = arguments.get("release", "current")
+    start_date = arguments.get("start_date")
+    end_date = arguments.get("end_date")
+    limit = arguments.get("limit", 60)
+
+    db = get_database()
+    try:
+        meta = _macro_series_meta(db, series_id)
+        if meta is None:
+            return [TextContent(
+                type="text",
+                text=f"Macro series not found: {series_id} (see list_macro_series)")]
+
+        if as_of:
+            df = db.get_macro_series(series_id, as_of=as_of,
+                                     start=start_date, end=end_date)
+            mode = f"as published on {as_of}"
+        elif release == "first":
+            df = db.get_macro_first_release(series_id, start=start_date,
+                                            end=end_date)
+            mode = "first release"
+        else:
+            df = db.get_macro_series(series_id, start=start_date, end=end_date)
+            mode = "current (latest revision)"
+
+        if df is None or df.empty:
+            hint = ""
+            if as_of:
+                hint = (" -- as_of may be before the series' earliest stored "
+                        "vintage (see list_macro_series)")
+            return [TextContent(
+                type="text", text=f"No data for {series_id}, {mode}{hint}")]
+
+        total = len(df)
+        df = df.sort_index(ascending=False).head(limit)
+
+        sa = f", {meta['seasonal_adjustment']}" if meta['seasonal_adjustment'] else ""
+        lines = [
+            f"{series_id} -- {meta['title']}",
+            f"Units: {meta['units']}{sa} | Frequency: {meta['frequency']} | {mode}",
+            f"{len(df)} of {total} rows, most recent first:",
+            "",
+            "Date       | Value",
+            "-" * 30,
+        ]
+        for date, row in df.iterrows():
+            lines.append(f"{date.strftime('%Y-%m-%d')} | {_format_macro_value(row['value'])}")
+
+        return [TextContent(type="text", text="\n".join(lines))]
+    finally:
+        db.close()
+
+
+async def handle_get_macro_revisions(arguments: dict[str, Any]) -> list[TextContent]:
+    """Show every published vintage of one macro observation."""
+    series_id = arguments["series_id"].upper()
+    observation_date = arguments["observation_date"]
+
+    db = get_database()
+    try:
+        meta = _macro_series_meta(db, series_id)
+        if meta is None:
+            return [TextContent(
+                type="text",
+                text=f"Macro series not found: {series_id} (see list_macro_series)")]
+
+        df = db.get_macro_vintages(series_id)
+        df = df[df['date'] == observation_date]
+        if df.empty:
+            return [TextContent(
+                type="text",
+                text=f"No observation {observation_date} for {series_id} "
+                     f"(FRED dates periods by their start, e.g. Q2 = YYYY-04-01)")]
+
+        lines = [
+            f"{series_id} {observation_date} -- {meta['title']} ({meta['units']})",
+            f"{len(df)} published version(s):",
+            "",
+            "Published from | Valid until  | Value",
+            "-" * 45,
+        ]
+        for _, r in df.iterrows():
+            until = "current" if r['realtime_end'] == '9999-12-31' else r['realtime_end']
+            lines.append(f"{r['realtime_start']}     | {until:<12} | {_format_macro_value(r['value'])}")
+        if not meta['keep_vintages']:
+            lines.append("")
+            lines.append("Note: this series is stored latest-only; no revision history is kept.")
+
+        return [TextContent(type="text", text="\n".join(lines))]
     finally:
         db.close()
 

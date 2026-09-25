@@ -49,7 +49,7 @@ claude mcp add marketdata-db \
     "$(pwd)/marketdata_mcp_server.py"
 ```
 
-## Tools (10 total)
+## Tools (15 total)
 
 ### Symbol Triplet Requirement
 
@@ -77,6 +77,15 @@ Symbol-specific tools require all three identifiers to avoid ambiguity:
 |------|-------------|
 | `get_database_status` | Database size, counts, date range |
 | `get_update_status` | EOD data freshness per exchange/type |
+
+### Macro series (FRED/ALFRED)
+Read-only; the series are fed nightly by marketdata-db (schema 1.25+).
+
+| Tool | Description |
+|------|-------------|
+| `list_macro_series` | Stored series with frequency, units, coverage and earliest vintage |
+| `get_macro_series` | Current values, first releases, or point-in-time values (`as_of`) |
+| `get_macro_revisions` | Every published version of one observation |
 
 ### Subscription Management
 | Tool | Description |
