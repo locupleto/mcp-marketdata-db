@@ -331,18 +331,18 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="list_macro_series",
-            description="List the FRED/ALFRED macro series stored in the database (GDP, CPI, payrolls, yields, ...): id, title, frequency, units, seasonal adjustment, whether full revision history (vintages) is kept, observation date range, earliest stored vintage, and FRED's last update time.",
+            description="List the macro series stored in the database: FRED/ALFRED (GDP, CPI, payrolls, yields, ...) and SqueezeMetrics (SQZ_GEX: dealer gamma exposure of SPX options in $, SQZ_DIX: Dark Index; daily since 2011): id, title, frequency, units, seasonal adjustment, whether full revision history (vintages) is kept, observation date range, earliest stored vintage, and the source's last update.",
             inputSchema={"type": "object", "properties": {}}
         ),
         Tool(
             name="get_macro_series",
-            description="Get a FRED macro series by FRED id (e.g. GDPC1, CPIAUCSL, PAYEMS, DGS10). Default returns today's (revised) values. Pass as_of='YYYY-MM-DD' for point-in-time values exactly as published on that day (ALFRED vintages; returns nothing for dates before the series' earliest stored vintage), or release='first' for each observation's first-published value. Use list_macro_series to discover ids.",
+            description="Get a macro series by id: FRED ids (e.g. GDPC1, CPIAUCSL, PAYEMS, DGS10) or SqueezeMetrics SQZ_GEX (SPX dealer gamma, negative = dealers short gamma, i.e. volatility-amplifying) and SQZ_DIX (Dark Index). Default returns today's (revised) values. Pass as_of='YYYY-MM-DD' for point-in-time values exactly as published on that day (ALFRED vintages; returns nothing for dates before the series' earliest stored vintage), or release='first' for each observation's first-published value. Use list_macro_series to discover ids.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "series_id": {
                         "type": "string",
-                        "description": "FRED series id, e.g. GDPC1"
+                        "description": "Series id, e.g. GDPC1 or SQZ_GEX"
                     },
                     "as_of": {
                         "type": "string",
@@ -379,7 +379,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "series_id": {
                         "type": "string",
-                        "description": "FRED series id, e.g. GDPC1"
+                        "description": "Series id, e.g. GDPC1 or SQZ_GEX"
                     },
                     "observation_date": {
                         "type": "string",
@@ -1089,7 +1089,7 @@ def _macro_series_meta(db: Database, series_id: str) -> Optional[dict]:
 
 
 async def handle_list_macro_series(arguments: dict[str, Any]) -> list[TextContent]:
-    """List stored FRED/ALFRED macro series with coverage."""
+    """List stored macro series (FRED/ALFRED and SqueezeMetrics) with coverage."""
     db = get_database()
     try:
         df_info = db.get_macro_series_info(subscribed_only=False)

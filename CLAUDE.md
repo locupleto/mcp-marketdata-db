@@ -73,7 +73,7 @@ Use `list_exchanges` or `get_symbol_types` to discover valid type values.
 - `get_database_status`: Database statistics (size, counts, date range)
 - `get_update_status`: EOD data freshness per exchange/type
 
-**Macro series (FRED/ALFRED, read-only):**
+**Macro series (FRED/ALFRED and SqueezeMetrics `SQZ_GEX`/`SQZ_DIX`, read-only):**
 - `list_macro_series`: Stored series with coverage and earliest vintage
 - `get_macro_series`: Current, first-release, or point-in-time (`as_of`) values
 - `get_macro_revisions`: Revision history of one observation
@@ -96,7 +96,7 @@ The SQLite database contains these key tables:
 - `eod_data`: End-of-day price data (OHLCV)
 - `splits`: Stock split information
 - `symbol_info`: Sector and industry classification
-- `macro_series` / `macro_observations`: FRED/ALFRED macro series with vintages (schema 1.25+)
+- `macro_series` / `macro_observations`: FRED/ALFRED macro series with vintages (schema 1.25+), plus SqueezeMetrics GEX/DIX under source `SQUEEZEMETRICS` (latest-only, marketdata-db 1.11.0+)
 
 ## Dependencies
 

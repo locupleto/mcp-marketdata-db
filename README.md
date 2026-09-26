@@ -78,7 +78,7 @@ Symbol-specific tools require all three identifiers to avoid ambiguity:
 | `get_database_status` | Database size, counts, date range |
 | `get_update_status` | EOD data freshness per exchange/type |
 
-### Macro series (FRED/ALFRED)
+### Macro series (FRED/ALFRED, SqueezeMetrics)
 Read-only; the series are fed nightly by marketdata-db (schema 1.25+).
 
 | Tool | Description |
