@@ -390,6 +390,73 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
+            name="list_cot_markets",
+            description="List the CFTC Commitments of Traders (COT) markets stored in the database: CFTC market code, name, exchange, commodity group, the report types available (legacy_fut, legacy_comb, disagg_fut, disagg_comb, tff_fut, tff_comb, cit), first/last report date and the mapped EOD symbol (e.g. GSPC for S&P 500 futures positioning) where one exists. Use it to find the market code for get_cot. Needs database schema 1.27+.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "search": {
+                        "type": "string",
+                        "description": "Optional case-insensitive text matched against market name, commodity, CFTC code and EOD symbol (e.g. 'crude', 'gold', 'S&P')"
+                    },
+                    "report_type": {
+                        "type": "string",
+                        "enum": ["legacy_fut", "legacy_comb", "disagg_fut", "disagg_comb", "tff_fut", "tff_comb", "cit"],
+                        "description": "Optional: only markets that have reports of this type"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of markets to return (default 50)",
+                        "default": 50
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="get_cot",
+            description="Get CFTC Commitments of Traders positioning for one market: per trader category long, short and net (long - short) contracts plus open interest, most recent report first. IMPORTANT timing: report_date is the Tuesday the positions were measured on (snapshot); released is the Friday the CFTC published them (shifted for holidays). The data is only knowable from `released`, so backtests and signals must key on released, never on report_date. Pass as_of='YYYY-MM-DD' for the point-in-time view: only reports released on or before that day (e.g. as_of 2026-11-05 ends at the 2026-10-27 report). Report types: tff_fut (financial futures: dealer, asset_mgr, lev_money, other_rept, nonrept), disagg_fut (commodities: prod_merc, swap, money_manager, other_rept, nonrept), legacy_fut (commercial / noncommercial / nonreportable, longest history), cit (index traders); *_comb = futures and options combined. Market is a CFTC code (e.g. 067651) or a mapped EOD symbol (e.g. GSPC); see list_cot_markets. include_index appends a Williams-style COT index (0-100: where the category's net sits in its trailing range) per category. Needs database schema 1.27+.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "market": {
+                        "type": "string",
+                        "description": "CFTC market code (e.g. 067651) or mapped EOD symbol (e.g. GSPC)"
+                    },
+                    "report_type": {
+                        "type": "string",
+                        "enum": ["legacy_fut", "legacy_comb", "disagg_fut", "disagg_comb", "tff_fut", "tff_comb", "cit"],
+                        "description": "Report type (default tff_fut)",
+                        "default": "tff_fut"
+                    },
+                    "as_of": {
+                        "type": "string",
+                        "description": "Optional point-in-time date YYYY-MM-DD: only reports released (published) on or before this day"
+                    },
+                    "weeks": {
+                        "type": "integer",
+                        "description": "Number of most recent reports to return (default 52)",
+                        "default": 52
+                    },
+                    "categories": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of trader categories to show (e.g. ['lev_money', 'asset_mgr']); default all"
+                    },
+                    "include_index": {
+                        "type": "boolean",
+                        "description": "Append a COT index column (0-100) for each category's net position (default false)",
+                        "default": False
+                    },
+                    "lookback_weeks": {
+                        "type": "integer",
+                        "description": "Window of the COT index in weeks (default 156 = 3 years); only used with include_index",
+                        "default": 156
+                    }
+                },
+                "required": ["market"]
+            }
+        ),
+        Tool(
             name="get_intraday_quote",
             description="Get live (15-20 min delayed) intraday quote for a symbol. Returns current price, bid/ask, volume, and other real-time data. Requires EOD_API_KEY environment variable to be set.",
             inputSchema={
@@ -452,6 +519,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return await handle_get_macro_series(arguments)
         elif name == "get_macro_revisions":
             return await handle_get_macro_revisions(arguments)
+        elif name == "list_cot_markets":
+            return await handle_list_cot_markets(arguments)
+        elif name == "get_cot":
+            return await handle_get_cot(arguments)
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
     except Exception as e:
@@ -1215,6 +1286,147 @@ async def handle_get_macro_revisions(arguments: dict[str, Any]) -> list[TextCont
         return [TextContent(type="text", text="\n".join(lines))]
     finally:
         db.close()
+
+COT_SCHEMA_MSG = ("CFTC COT tables not found: the database is older than schema "
+                  "1.27 (COT needs marketdata-db 1.13.0 / schema 1.27; run the "
+                  "install/migrate_to_v127.py migration).")
+
+
+def _cot_available(db: Database) -> bool:
+    """True when the database has the COT tables (schema 1.27+)."""
+    df = db.sql("SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name IN ('cot_markets', 'cot_reports', 'cot_positions')")
+    return len(df) == 3
+
+
+def _format_cot_int(value) -> str:
+    """Format a contract count; NULL/NaN shows as n/a."""
+    if value is None or pd.isna(value):
+        return "n/a"
+    return f"{value:,.0f}"
+
+
+async def handle_list_cot_markets(arguments: dict[str, Any]) -> list[TextContent]:
+    """List CFTC COT markets with report types, coverage and EOD mapping."""
+    search = arguments.get("search")
+    report_type = arguments.get("report_type")
+    limit = arguments.get("limit", 50)
+
+    db = get_database()
+    try:
+        if not _cot_available(db):
+            return [TextContent(type="text", text=COT_SCHEMA_MSG)]
+        df = db.get_cot_markets(search=search, report_type=report_type)
+        if df.empty:
+            return [TextContent(type="text", text="No COT markets found.")]
+
+        total = len(df)
+        df = df.head(limit)
+        lines = [
+            f"COT markets ({len(df)} of {total}):",
+            "",
+            "Code | Name | Exchange | Group | Report types | First .. Last report | EOD symbol",
+            "-" * 100,
+        ]
+        for _, r in df.iterrows():
+            eod = ""
+            if r['eod_symbol']:
+                eod = f"{r['eod_symbol']}.{r['eod_exchange']}" if r['eod_exchange'] else r['eod_symbol']
+            group = r['commodity_group'] or ""
+            if r['commodity_subgroup']:
+                group = f"{group}/{r['commodity_subgroup']}"
+            lines.append(
+                f"{r['market_code']} | {r['market_and_exchange_name']} | "
+                f"{r['exchange_code'] or ''} | {group} | {r['report_types'] or ''} | "
+                f"{r['first_report_date']} .. {r['last_report_date']} | {eod}")
+        if total > len(df):
+            lines.append("")
+            lines.append(f"{total - len(df)} more; narrow with search/report_type or raise limit.")
+        return [TextContent(type="text", text="\n".join(lines))]
+    except ValueError as e:
+        return [TextContent(type="text", text=f"Error: {e}")]
+    finally:
+        db.close()
+
+
+async def handle_get_cot(arguments: dict[str, Any]) -> list[TextContent]:
+    """Get COT positions of one market, optionally point in time, with COT index."""
+    market = arguments["market"].strip()
+    report_type = arguments.get("report_type", "tff_fut")
+    as_of = arguments.get("as_of")
+    weeks = arguments.get("weeks", 52)
+    categories = arguments.get("categories")
+    include_index = arguments.get("include_index", False)
+    lookback_weeks = arguments.get("lookback_weeks", 156)
+
+    db = get_database()
+    try:
+        if not _cot_available(db):
+            return [TextContent(type="text", text=COT_SCHEMA_MSG)]
+
+        try:
+            df = db.get_cot(market, report_type=report_type, as_of=as_of)
+        except ValueError as e:
+            return [TextContent(
+                type="text", text=f"Error: {e} (see list_cot_markets)")]
+
+        mode = f"as published by {as_of}" if as_of else "all releases to date"
+        if df.empty:
+            return [TextContent(
+                type="text",
+                text=f"No COT data for {market}, {report_type}, {mode} "
+                     f"(check the report type with list_cot_markets)")]
+
+        have = [c[:-4] for c in df.columns if c.endswith('_net')]
+        if categories:
+            wanted = [c.lower() for c in categories]
+            bad = [c for c in wanted if c not in have]
+            if bad:
+                return [TextContent(
+                    type="text",
+                    text=f"Error: unknown categories {bad} for {report_type} (have {have})")]
+            have = wanted
+
+        index_cols = {}
+        if include_index:
+            for cat in have:
+                index_cols[cat] = db.get_cot_index(
+                    market, cat, report_type=report_type,
+                    lookback_weeks=lookback_weeks, as_of=as_of)
+
+        total = len(df)
+        df = df.sort_index(ascending=False).head(weeks)
+
+        cols = []
+        for cat in have:
+            cols += [f"{cat}_long", f"{cat}_short", f"{cat}_net"]
+        header = ["report_date", "released", "open_interest"] + cols
+        if include_index:
+            header += [f"{cat}_index" for cat in have]
+        lines = [
+            f"COT {market} -- {report_type} | {mode}",
+            f"{len(df)} of {total} reports, most recent first. report_date = Tuesday "
+            f"snapshot, released = publication date (key backtests on released).",
+            "",
+            " | ".join(header),
+            "-" * 100,
+        ]
+        for date, row in df.iterrows():
+            vals = [date.strftime('%Y-%m-%d'), str(row['released']),
+                    _format_cot_int(row['open_interest'])]
+            vals += [_format_cot_int(row[c]) for c in cols]
+            for cat in have if include_index else []:
+                v = index_cols[cat].get(date)
+                vals.append("n/a" if v is None or pd.isna(v) else f"{v:.0f}")
+            lines.append(" | ".join(vals))
+        if include_index:
+            lines.append("")
+            lines.append(f"index = 0-100 position of net within the trailing "
+                         f"{lookback_weeks} reports (n/a until the window is full).")
+        return [TextContent(type="text", text="\n".join(lines))]
+    finally:
+        db.close()
+
 
 
 async def handle_get_intraday_quote(arguments: dict[str, Any]) -> list[TextContent]:

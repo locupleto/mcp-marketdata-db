@@ -87,6 +87,14 @@ Read-only; the series are fed nightly by marketdata-db (schema 1.25+).
 | `get_macro_series` | Current values, first releases, or point-in-time values (`as_of`) |
 | `get_macro_revisions` | Every published version of one observation |
 
+### CFTC Commitments of Traders (COT)
+Read-only; fed weekly by marketdata-db (schema 1.27+, package 1.13.0). `report_date` is the Tuesday snapshot, `released` the Friday publication date: key backtests on `released`.
+
+| Tool | Description |
+|------|-------------|
+| `list_cot_markets` | COT markets with CFTC code, group, report types, coverage and EOD symbol mapping (`search`, `report_type`, `limit`) |
+| `get_cot` | Long/short/net per trader category plus open interest for one market; `as_of` point in time, `weeks`, `categories`, optional COT index (`include_index`, `lookback_weeks`) |
+
 ### Subscription Management
 | Tool | Description |
 |------|-------------|

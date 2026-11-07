@@ -57,7 +57,7 @@ The server (`marketdata_mcp_server.py`) is a single-file MCP server using `mcp.s
 
 Use `list_exchanges` or `get_symbol_types` to discover valid type values.
 
-### Tools (15 total)
+### Tools (17 total)
 
 **Data Retrieval:**
 - `get_eod_data`: Get OHLCV price data (requires triplet)
@@ -78,6 +78,10 @@ Use `list_exchanges` or `get_symbol_types` to discover valid type values.
 - `get_macro_series`: Current, first-release, or point-in-time (`as_of`) values
 - `get_macro_revisions`: Revision history of one observation
 
+**CFTC Commitments of Traders (read-only, schema 1.27+):**
+- `list_cot_markets`: COT markets with code, group, report types, coverage, EOD mapping
+- `get_cot`: Positions per trader category (long/short/net, open interest); `as_of` point in time on `released` (Friday publication; `report_date` is the Tuesday snapshot); optional COT index
+
 **Subscription Management:**
 - `subscribe_symbol`: Start tracking a symbol (requires triplet)
 - `unsubscribe_symbol`: Stop tracking a symbol (requires triplet)
@@ -97,6 +101,7 @@ The SQLite database contains these key tables:
 - `splits`: Stock split information
 - `symbol_info`: Sector and industry classification
 - `macro_series` / `macro_observations`: FRED/ALFRED macro series with vintages (schema 1.25+), plus SqueezeMetrics GEX/DIX under source `SQUEEZEMETRICS` (latest-only, marketdata-db 1.11.0+)
+- `cot_markets` / `cot_reports` / `cot_positions`: CFTC COT data (schema 1.27+, marketdata-db 1.13.0+); `released` is the point-in-time key
 
 ## Dependencies
 
