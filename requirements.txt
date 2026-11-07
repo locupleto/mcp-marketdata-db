@@ -2,6 +2,6 @@
 mcp>=2,<3
 
 # Market Data and Trading
-marketdata-db-locupleto @ git+https://github.com/locupleto/marketdata-db.git@818c4901c23bd5d3c36fb2db3788f983470f1e16
+marketdata-db-locupleto @ git+https://github.com/locupleto/marketdata-db.git@2efc0fed3008a0d80575a1ddcb2a8165e5bdb223
 yfinance>=0.2.65
 eod>=0.2.1
